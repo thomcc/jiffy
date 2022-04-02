@@ -16,3 +16,9 @@ seize = "0.2.1"
 [dev-dependencies]
 criterion = "0.3.5"
 rand = "0.8.5"
+# mimalloc = {version="0.1.28", default-features = false}
+
+[profile.release]
+debug = true
+lto = true
+# codegen-units = 1

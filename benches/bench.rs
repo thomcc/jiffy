@@ -5,8 +5,11 @@ use std::{
 
 use criterion::{criterion_group, criterion_main, Criterion};
 
-const THREADS: usize = 15;
-const MESSAGES: usize = 15 * 100_000;
+// #[global_allocator]
+// static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+const THREADS: usize = 128;
+const MESSAGES: usize = THREADS * 100_000;
 
 struct Chan<T> {
     thread: thread::Thread,
@@ -22,17 +25,20 @@ impl<T> Chan<T> {
             inner,
         }
     }
-
+    // #[inline(never)]
     fn send<V, F: Fn(&T) -> Result<(), V>>(&self, f: F) -> Result<(), V> {
         f(&self.inner).map(|_| self.unpark())
     }
-
+    // #[inline(never)]
     fn recv<V>(&self, f: impl Fn(&T) -> Option<V>) -> Option<V> {
         loop {
             match f(&self.inner) {
                 Some(x) => break Some(x),
                 None => {
-                    while !self.unparked.swap(false, Ordering::Acquire) {
+                    while !self.unparked.swap(false, Ordering::AcqRel) {
+                        if let Some(v) = f(&self.inner) {
+                            return Some(v);
+                        }
                         thread::park();
                     }
                 }
@@ -66,11 +72,11 @@ fn mpsc(c: &mut Criterion) {
 
                 for i in 0..MESSAGES {
                     match queue.recv(|c| unsafe { c.pop() }) {
-                        Some(_) => {},
+                        Some(_) => {}
                         None => unreachable!("failed to pop {:?}/{}", i, {
                             let c = MESSAGES / THREADS;
                             c * THREADS
-                        })
+                        }),
                     }
                 }
             })
@@ -99,6 +105,7 @@ fn mpsc(c: &mut Criterion) {
     //     })
     // });
 
+    // #[cfg(bench_all)]
     group.bench_function("riffy", |b| {
         b.iter(|| {
             let queue = Chan::new(riffy::MpscQueue::new());
@@ -120,6 +127,7 @@ fn mpsc(c: &mut Criterion) {
         })
     });
 
+    // #[cfg(bench_all)]
     group.bench_function("crossbeam-queue", |b| {
         b.iter(|| {
             let queue = Chan::new(crossbeam::queue::SegQueue::new());
@@ -141,6 +149,7 @@ fn mpsc(c: &mut Criterion) {
         })
     });
 
+    // #[cfg(bench_all)]
     group.bench_function("std", |b| {
         b.iter(|| {
             let (tx, rx) = std::sync::mpsc::channel();
@@ -162,7 +171,7 @@ fn mpsc(c: &mut Criterion) {
             .unwrap();
         })
     });
-
+    // #[cfg(any())]
     group.bench_function("flume", |b| {
         b.iter(|| {
             let (tx, rx) = flume::unbounded();

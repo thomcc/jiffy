@@ -1,22 +1,36 @@
 use crate::utils::CachePadded;
 use std::{
-    thread,
-    pin::Pin,
-    ptr::{self, NonNull},
-    marker::{PhantomPinned, PhantomData},
-    num::NonZeroUsize,
     cell::{Cell, UnsafeCell},
     hint::spin_loop,
+    marker::{PhantomData, PhantomPinned},
     mem::{drop, MaybeUninit},
-    sync::atomic::{AtomicPtr, AtomicUsize, AtomicBool, Ordering},
+    num::NonZeroUsize,
+    pin::Pin,
+    ptr::{self, NonNull},
+    sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering},
+    thread,
 };
 
 #[derive(Default)]
 struct SpinWait {
-    counter: u32,
+    counter: usize,
 }
 
 impl SpinWait {
+    fn try_yield_now(&mut self) -> bool {
+        false
+    }
+    fn yield_now(&mut self) {
+        self.counter += 1;
+        // if self.counter <= 4 {
+        //     for _ in 0..(1 << self.counter) {
+        //         spin_loop();
+        //     }
+        // } else {
+        std::thread::yield_now();
+        // }
+    }
+    #[cfg(any())]
     fn try_yield_now(&mut self) -> bool {
         if !Self::should_spin() {
             return false;
@@ -30,7 +44,7 @@ impl SpinWait {
         spin_loop();
         true
     }
-
+    #[cfg(any())]
     fn yield_now(&mut self) {
         if !Self::should_spin() {
             return;
@@ -45,16 +59,15 @@ impl SpinWait {
     fn should_spin() -> bool {
         static NUM_CPUS: AtomicUsize = AtomicUsize::new(0);
 
-        let num_cpus = NonZeroUsize::new(NUM_CPUS.load(Ordering::Relaxed))
-            .unwrap_or_else(|| {
-                let num_cpus = thread::available_parallelism()
-                    .ok()
-                    .or(NonZeroUsize::new(1))
-                    .unwrap();
+        let num_cpus = NonZeroUsize::new(NUM_CPUS.load(Ordering::Relaxed)).unwrap_or_else(|| {
+            let num_cpus = thread::available_parallelism()
+                .ok()
+                .or(NonZeroUsize::new(1))
+                .unwrap();
 
-                NUM_CPUS.store(num_cpus.get(), Ordering::Relaxed);
-                num_cpus
-            });
+            NUM_CPUS.store(num_cpus.get(), Ordering::Relaxed);
+            num_cpus
+        });
 
         num_cpus.get() > 1
     }
@@ -141,7 +154,7 @@ impl Parker {
         let event_ptr = NonNull::from(&self.event).as_ptr();
         let notified = NonNull::dangling().as_ptr();
         drop(self);
-        
+
         let ev = (*event_ptr).swap(notified, Ordering::AcqRel);
         assert!(!ptr::eq(ev, notified), "multiple threads unparked Parker");
 
@@ -164,6 +177,8 @@ struct WaitList {
 }
 
 impl WaitList {
+    // #[cold]
+    #[inline(never)]
     fn wait_while(&self, mut should_wait: impl FnMut() -> bool) {
         let waiter = Waiter::default();
         let waiter = unsafe { Pin::new_unchecked(&waiter) };
@@ -180,7 +195,7 @@ impl WaitList {
             waiter.next.set(NonNull::new(top));
             if let Err(e) = self.top.compare_exchange_weak(
                 top,
-                NonNull::from(&*waiter).as_ptr(),
+                &*waiter as *const Waiter as *mut Waiter,
                 Ordering::AcqRel,
                 Ordering::Relaxed,
             ) {
@@ -197,19 +212,21 @@ impl WaitList {
         }
     }
 
+    // #[cold]
+    #[inline(never)]
     fn wake_all(&self) {
-        let mut top = self.top.load(Ordering::Relaxed);
-        while !top.is_null() {
-            match self.top.compare_exchange_weak(
-                top,
-                ptr::null_mut(),
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(e) => top = e,
-            }
-        }
+        let mut top = self.top.swap(ptr::null_mut(), Ordering::AcqRel);
+        // while !top.is_null() {
+        //     match self.top.compare_exchange_weak(
+        //         top,
+        //         ptr::null_mut(),
+        //         Ordering::AcqRel,
+        //         Ordering::Relaxed,
+        //     ) {
+        //         Ok(_) => break,
+        //         Err(e) => top = e,
+        //     }
+        // }
 
         while !top.is_null() {
             unsafe {
@@ -237,7 +254,7 @@ impl<T> Value<T> {
     }
 }
 
-const LAP: usize = 256;
+const LAP: usize = 32;
 const BLOCK_CAP: usize = LAP - 1;
 
 struct Block<T> {
@@ -299,7 +316,7 @@ impl<T> MpscQueue<T> {
     pub fn push(&self, item: T) {
         let mut next_block = None;
         let mut spin = SpinWait::default();
-        
+
         loop {
             let position = self.producer.position.load(Ordering::Acquire);
             let index = position % LAP;
@@ -307,7 +324,8 @@ impl<T> MpscQueue<T> {
             if index == BLOCK_CAP {
                 let should_wait = || {
                     let current_pos = self.producer.position.load(Ordering::Relaxed);
-                    current_pos % LAP == BLOCK_CAP
+                    // current_pos % LAP == BLOCK_CAP
+                    current_pos == position
                 };
 
                 self.producer.waiters.wait_while(should_wait);
@@ -352,9 +370,11 @@ impl<T> MpscQueue<T> {
                     let next_block = Box::into_raw(next_block.unwrap());
                     self.producer.block.store(next_block, Ordering::Release);
                     (*block).next.store(next_block, Ordering::Release);
-                    
+
                     let next_position = new_position.wrapping_add(1);
-                    self.producer.position.store(next_position, Ordering::Release);
+                    self.producer
+                        .position
+                        .store(next_position, Ordering::Release);
                     self.producer.waiters.wake_all();
                 }
 
@@ -394,7 +414,7 @@ impl<T> MpscQueue<T> {
 
         if stored.load(Ordering::Acquire) {
             self.consumer.index.set(index + 1);
-            return Some(value.read()); 
+            return Some(value.read());
         }
 
         None

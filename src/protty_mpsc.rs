@@ -18,17 +18,18 @@ struct SpinWait {
 
 impl SpinWait {
     fn try_yield_now(&mut self) -> bool {
+        // spin_loop();
         false
     }
     fn yield_now(&mut self) {
         self.counter += 1;
-        // if self.counter <= 4 {
-        //     for _ in 0..(1 << self.counter) {
-        //         spin_loop();
-        //     }
-        // } else {
-        std::thread::yield_now();
-        // }
+        if self.counter <= 3 {
+            for _ in 0..(1 << self.counter) {
+                spin_loop();
+            }
+        } else {
+            std::thread::yield_now();
+        }
     }
     #[cfg(any())]
     fn try_yield_now(&mut self) -> bool {

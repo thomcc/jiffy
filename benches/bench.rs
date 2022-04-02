@@ -8,7 +8,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 // #[global_allocator]
 // static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const THREADS: usize = 128;
+const THREADS: usize = 15;
 const MESSAGES: usize = THREADS * 100_000;
 
 struct Chan<T> {

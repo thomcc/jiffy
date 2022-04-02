@@ -23,7 +23,7 @@ impl<T> Chan<T> {
         }
     }
 
-    fn send<V>(&self, f: impl Fn(&T) -> Result<(), V>) -> Result<(), V> {
+    fn send<V, F: Fn(&T) -> Result<(), V>>(&self, f: F) -> Result<(), V> {
         f(&self.inner).map(|_| self.unpark())
     }
 
@@ -41,16 +41,9 @@ impl<T> Chan<T> {
     }
 
     fn unpark(&self) {
-        self.unparked
-            .fetch_update(Ordering::Release, Ordering::Relaxed, |unparked| {
-                if unparked {
-                    None
-                } else {
-                    Some(true)
-                }
-            })
-            .map(|_| self.thread.unpark())
-            .unwrap_or(());
+        if !self.unparked.swap(true, Ordering::Release) {
+            self.thread.unpark();
+        }
     }
 }
 
@@ -58,26 +51,53 @@ fn mpsc(c: &mut Criterion) {
     let mut group = c.benchmark_group("mpsc");
     group.sample_size(10);
 
-    group.bench_function("jiffy", |b| {
+    group.bench_function("protty-mpsc", |b| {
         b.iter(|| {
-            let queue = Chan::new(jiffy::Queue::new());
+            let queue = Chan::new(jiffy::protty_mpsc::MpscQueue::default());
 
             crossbeam::scope(|scope| {
                 for _ in 0..THREADS {
                     scope.spawn(|_| {
                         for i in 0..MESSAGES / THREADS {
-                            queue.send(|c| Ok::<_, ()>(c.push(i))).unwrap();
+                            queue.send::<usize, _>(|c| Ok(c.push(i))).unwrap();
                         }
                     });
                 }
 
-                for _ in 0..MESSAGES {
-                    queue.recv(|c| unsafe { c.pop() }).unwrap();
+                for i in 0..MESSAGES {
+                    match queue.recv(|c| unsafe { c.pop() }) {
+                        Some(_) => {},
+                        None => unreachable!("failed to pop {:?}/{}", i, {
+                            let c = MESSAGES / THREADS;
+                            c * THREADS
+                        })
+                    }
                 }
             })
             .unwrap();
         })
     });
+
+    // group.bench_function("jiffy", |b| {
+    //     b.iter(|| {
+    //         let queue = Chan::new(jiffy::Queue::new());
+
+    //         crossbeam::scope(|scope| {
+    //             for _ in 0..THREADS {
+    //                 scope.spawn(|_| {
+    //                     for i in 0..MESSAGES / THREADS {
+    //                         queue.send(|c| Ok::<_, ()>(c.push(i))).unwrap();
+    //                     }
+    //                 });
+    //             }
+
+    //             for _ in 0..MESSAGES {
+    //                 queue.recv(|c| unsafe { c.pop() }).unwrap();
+    //             }
+    //         })
+    //         .unwrap();
+    //     })
+    // });
 
     group.bench_function("riffy", |b| {
         b.iter(|| {
@@ -115,27 +135,6 @@ fn mpsc(c: &mut Criterion) {
 
                 for _ in 0..MESSAGES {
                     queue.recv(|c| c.pop()).unwrap();
-                }
-            })
-            .unwrap();
-        })
-    });
-
-    group.bench_function("crossbeam-channel", |b| {
-        b.iter(|| {
-            let (tx, rx) = crossbeam::channel::unbounded();
-
-            crossbeam::scope(|scope| {
-                for _ in 0..THREADS {
-                    scope.spawn(|_| {
-                        for i in 0..MESSAGES / THREADS {
-                            tx.send(i).unwrap();
-                        }
-                    });
-                }
-
-                for _ in 0..MESSAGES {
-                    rx.recv().unwrap();
                 }
             })
             .unwrap();

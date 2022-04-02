@@ -6,6 +6,8 @@ use std::mem::{self, MaybeUninit};
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 
+pub mod protty_mpsc;
+
 const BLOCK: usize = 1620;
 
 pub struct Queue<T> {
